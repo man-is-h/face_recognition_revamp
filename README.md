@@ -1,0 +1,1 @@
+Revamping the face recognition project moving from still images to real time video recognition and exploring new deep learning models, apart from ResNet-50.
