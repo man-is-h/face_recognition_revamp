@@ -51,7 +51,7 @@ def get_features(img, face, face_recognizer = None):
     features = face_recognizer.feature(aligned_face)
     return features
 
-def recognize_face(img, faces):
+def recognize_faces(img, faces):
     # initialize face recognizer
     face_recognizer = cv2.FaceRecognizerSF.create(
         model=str(fr_model_path),
@@ -162,14 +162,13 @@ def main():
         tm.start()
         faces = detect_faces(video_frame, w, h)
         tm.stop()
-        recognized_faces = recognize_face(video_frame, faces)
+        recognized_faces = recognize_faces(video_frame, faces)
         visualize_recognized_faces(video_frame, faces, recognized_faces, tm.getFPS())
-        cv2.imshow('Face Detection', video_frame)
+        cv2.imshow('Face Recognition', video_frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     video_capture.release()
-    cv2.destroyAllWindows()
-        
+    cv2.destroyAllWindows()        
 
 if __name__ == "__main__":
     main()
