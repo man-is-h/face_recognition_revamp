@@ -62,6 +62,7 @@ class FaceRecognition:
             result, frame = video_capture.read()
             if result is False:
                 break
+            frame = cv2.flip(frame, 1)
             frame = cv2.resize(frame, (640, 480), cv2.INTER_AREA)
             faces = self.detect_faces(frame, w, h)
             cv2.putText(frame, 'Capturing image for '+namesArray[captured_count], (1, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
@@ -141,6 +142,7 @@ class FaceRecognition:
             result, frame = video_capture.read()
             if result is False:
                 break
+            frame = cv2.flip(frame, 1)
             frame = cv2.resize(frame, (640, 480), cv2.INTER_AREA)
             tm.start()
             faces = self.detect_faces(frame, w, h)
