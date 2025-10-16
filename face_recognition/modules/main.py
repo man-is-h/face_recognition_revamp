@@ -10,19 +10,34 @@ fr_model_path = Path(__file__).parent.parent / "datasources" / "face_recognition
 fr_model_threshold = 0.5
 
 class FaceRecognition:
-    def __init__(self):
+    def __init__(self, input_size=(640, 480)):
+        """Initialize face recognition system with optimized settings.
+        
+        Args:
+            input_size (tuple): Width and height for processing. Using a fixed size
+                              improves performance. Default (640, 480).
+        """
         self.known_faces_dict = {}
+        self.input_size = input_size
+        # Pre-allocate frame buffer
+        self.frame_buffer = np.zeros((input_size[1], input_size[0], 3), dtype=np.uint8)
+        
+        # Configure face detector with OpenCV DNN optimizations
         self.face_detector = cv2.FaceDetectorYN.create(
             model=str(fd_model_path),
             config="",
-            input_size=(640, 480),
+            input_size=input_size,
             score_threshold=fd_model_threshold,
+            backend_id=cv2.dnn.DNN_BACKEND_CUDA if cv2.cuda.getCudaEnabledDeviceCount() > 0 else cv2.dnn.DNN_BACKEND_OPENCV,
+            target_id=cv2.dnn.DNN_TARGET_CUDA if cv2.cuda.getCudaEnabledDeviceCount() > 0 else cv2.dnn.DNN_TARGET_CPU
         )
+        
+        # Configure face recognizer with optimizations
         self.face_recognizer = cv2.FaceRecognizerSF.create(
             model=str(fr_model_path),
             config="",
-            backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
-            target_id=cv2.dnn.DNN_TARGET_CPU
+            backend_id=cv2.dnn.DNN_BACKEND_CUDA if cv2.cuda.getCudaEnabledDeviceCount() > 0 else cv2.dnn.DNN_BACKEND_OPENCV,
+            target_id=cv2.dnn.DNN_TARGET_CUDA if cv2.cuda.getCudaEnabledDeviceCount() > 0 else cv2.dnn.DNN_TARGET_CPU
         )
 
     def visualize(self, frame, faces, thickness=2):
@@ -41,13 +56,24 @@ class FaceRecognition:
                 cv2.rectangle(frame, (coords[0], coords[1]), (coords[0]+coords[2], coords[1]+coords[3]), (0, 255, 0), thickness)
     
     def visualize_recognized_faces(self, frame, faces, recognized_faces, fps):
-        # 14: face score
+        """Visualize recognized faces, supporting both single and multiple matches per face."""
         if faces is not None:
             for idx, face in enumerate(faces):
                 coords = face[:-1].astype(np.int32)
-                if recognized_faces[idx] is not None:
-                    cv2.putText(frame, recognized_faces[idx].upper(), (coords[0], coords[1]-4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        cv2.putText(frame, 'FPS: {:.2f}'.format(fps), (1, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                if isinstance(recognized_faces[idx], list) and recognized_faces[idx]:
+                    # Multiple matches mode - show top 3 matches with scores
+                    for i, (name, score) in enumerate(recognized_faces[idx][:3]):
+                        text = f"{name.upper()} ({score:.2f})"
+                        y_offset = -4 - (i * 25)  # Stack names vertically
+                        cv2.putText(frame, text, (coords[0], coords[1]+y_offset), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                elif recognized_faces[idx]:
+                    # Single match mode - show just the name
+                    cv2.putText(frame, recognized_faces[idx].upper(), 
+                              (coords[0], coords[1]-4), cv2.FONT_HERSHEY_SIMPLEX, 
+                              0.6, (0, 0, 255), 2)
+        cv2.putText(frame, 'FPS: {:.2f}'.format(fps), (1, 16), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     
     def capture_image(self, num_faces, namesArray):
         # capture image from webcam
@@ -93,31 +119,59 @@ class FaceRecognition:
             # add face feature to known_faces_dict
             self.known_faces_dict[namesArray[i]] = self.get_features(frames[i], faces[i][:-1])
     
-    def recognize_faces(self, frame, faces):
-        # list of recognized faces
-        # if no face is recognized, return None for that face
+    def recognize_faces(self, frame, faces, return_all_matches=False):
+        """Recognize faces with optimized batch processing.
+        
+        Args:
+            frame: Input frame containing faces
+            faces: Detected face coordinates
+            return_all_matches: If True, returns list of all matches above threshold
+                              for each face. If False, returns only best match.
+        
+        Returns:
+            If return_all_matches=False: List of best matches (one per face)
+            If return_all_matches=True: List of lists containing all matches per face
+                                      with similarities above threshold
+        """
         if faces is None:
             return None
-        recognized_faces = len(faces)*[None]
+            
+        recognized_faces = [[] if return_all_matches else None] * len(faces)
+        if not self.known_faces_dict:
+            return recognized_faces
+            
+        # Extract features for all faces in one batch
+        features_list = [self.get_features(frame, face[:-1]) for face in faces]
         
-
-        for idx, face in enumerate(faces):
-            # get features from face recognizer
-            features = self.get_features(frame, face[:-1])
-
-            # compare features with known faces
-            for name, known_features in self.known_faces_dict.items():
-                similarity = self.face_recognizer.match(features, known_features, 0)
-                # print(distance)
-                if similarity > fr_model_threshold:
-                    recognized_faces[idx] = name
-                    break;
-
+        # Prepare known faces array for vectorized comparison
+        known_names = list(self.known_faces_dict.keys())
+        known_features = np.array([self.known_faces_dict[name] for name in known_names])
+        
+        # Compare each detected face against all known faces efficiently
+        for idx, features in enumerate(features_list):
+            # Compute similarities with all known faces at once
+            similarities = np.array([self.face_recognizer.match(features, kf, 0) for kf in known_features])
+            
+            if return_all_matches:
+                # Get all matches above threshold with their scores
+                matches = [(name, score) for name, score in zip(known_names, similarities) 
+                          if score > fr_model_threshold]
+                # Sort by similarity score in descending order
+                matches.sort(key=lambda x: x[1], reverse=True)
+                recognized_faces[idx] = matches
+            else:
+                # Return only the best match if above threshold
+                max_similarity_idx = np.argmax(similarities)
+                if similarities[max_similarity_idx] > fr_model_threshold:
+                    recognized_faces[idx] = known_names[max_similarity_idx]
+                
         return recognized_faces
     
     def detect_faces(self, frame, w, h):
-        img = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-        _, faces = self.face_detector.detect(img)
+        """Detect faces with optimized preprocessing."""
+        # Reuse pre-allocated buffer for color conversion
+        cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR, dst=self.frame_buffer)
+        _, faces = self.face_detector.detect(self.frame_buffer)
         self.visualize(frame, faces)
         return faces
     
@@ -127,31 +181,55 @@ class FaceRecognition:
         # get features from face recognizer
         return self.face_recognizer.feature(face)
 
-    def start_recognition(self):
-        # Ask user to enter names of the persons to be recognized
+    def start_recognition(self, skip_frames=1):
+        """Start face recognition with performance optimizations.
+        
+        Args:
+            skip_frames (int): Process every nth frame to reduce CPU load.
+        """
         self.add_known_faces()
 
-        # start video capture
+        # Configure video capture for performance
         video_capture = cv2.VideoCapture(0)
+        video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
         w = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
         tm = cv2.TickMeter()
+        frame_count = 0
+        last_faces = None
+        last_recognized = None
         
-        while True:
-            result, frame = video_capture.read()
-            if result is False:
-                break
-            frame = cv2.flip(frame, 1)
-            frame = cv2.resize(frame, (640, 480), cv2.INTER_AREA)
-            tm.start()
-            faces = self.detect_faces(frame, w, h)
-            recognized_faces = self.recognize_faces(frame, faces)
-            tm.stop()
-            self.visualize_recognized_faces(frame, faces, recognized_faces, tm.getFPS())
-            cv2.imshow('Face Recognition', frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        try:
+            while True:
+                result, frame = video_capture.read()
+                if not result:
+                    break
+                    
+                frame_count += 1
+                frame = cv2.flip(frame, 1)
+                frame = cv2.resize(frame, self.input_size, dst=self.frame_buffer)
+                
+                # Process only every nth frame for detection/recognition
+                if frame_count % skip_frames == 0:
+                    tm.start()
+                    faces = self.detect_faces(frame, w, h)
+                    if faces is not None and len(faces) > 0:
+                        # Get all matches above threshold with their scores
+                        recognized_faces = self.recognize_faces(frame, faces, return_all_matches=True)
+                        last_faces, last_recognized = faces, recognized_faces
+                    tm.stop()
+                
+                # Always show last detection results
+                if last_faces is not None:
+                    self.visualize_recognized_faces(frame, last_faces, last_recognized, tm.getFPS())
+                
+                cv2.imshow('Face Recognition', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+        finally:
+            video_capture.release()
+            cv2.destroyAllWindows()
         video_capture.release()
         cv2.destroyAllWindows()
         
